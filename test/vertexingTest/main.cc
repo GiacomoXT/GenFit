@@ -131,7 +131,7 @@ int main() {
       for (int i = 0; i < 3; ++i)
         covM(i,i) = resolution*resolution;
       for (int i = 3; i < 6; ++i)
-        covM(i,i) = square(resolution / nMeasurements / sqrt(3));
+        covM(i,i) = genfit::square(resolution / nMeasurements / sqrt(3));
 
 
       // trackrep
