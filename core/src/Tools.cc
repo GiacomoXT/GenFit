@@ -23,6 +23,7 @@
 #include <memory>
 #include <typeinfo>
 #include <cassert>
+#include <cstring>
 
 #include <TDecompChol.h>
 #include <TMatrixDSymEigen.h>
@@ -188,17 +189,44 @@ bool tools::transposedForwardSubstitution(const TMatrixD& R, TMatrixD& b, int nC
 // inv will be the inverse of the transposed of the upper-right matrix R
 bool tools::transposedInvert(const TMatrixD& R, TMatrixD& inv)
 {
-  bool result = true;
-
   inv.ResizeTo(R);
-  double *const invk = inv.GetMatrixArray();
-  int nRows = inv.GetNrows();
-  for (int i = 0; i < nRows; ++i)
-    for (int j = 0; j < nRows; ++j)
-      invk[i*nRows + j] = (i == j);
 
-  for (int i = 0; i < inv.GetNcols(); ++i)
-    result = result && transposedForwardSubstitution(R, inv, i);
+  const int n = R.GetNrows();
+  const double* const Rk = R.GetMatrixArray();
+  double* const invk = inv.GetMatrixArray();
+
+  // The result is lower triangular (it is the transpose of the inverse of the
+  // upper-right matrix R).  Initialise to the identity, exactly as before: the
+  // loop below overwrites the lower triangle (including the diagonal) on
+  // success, and on failure the untouched entries keep the identity values the
+  // previous implementation also left behind.
+  std::memset(invk, 0, sizeof(double) * n * n);
+  for (int i = 0; i < n; ++i)
+    invk[i*n + i] = 1.;
+
+  // Solve R^T inv = I column by column.  This is the forward substitution that
+  // used to be delegated to transposedForwardSubstitution(), inlined here.  For
+  // column c only rows i >= c are non-zero, and within a row only j in [c, i)
+  // contribute (the leading entries of the column are zero), so we start both
+  // loops at c.  The previous implementation initialised inv to the identity
+  // and summed j from 0, multiplying in those leading zeros; skipping them is
+  // numerically identical and roughly halves the inner-loop work.
+  bool result = true;
+  for (int c = 0; c < n && result; ++c) {
+    const double* const invc = invk + c;        // inv(j,c) == invc[j*n]
+    for (int i = c; i < n; ++i) {
+      const double* const Ri = Rk + i;          // R(j,i) == Ri[j*n]
+      double sum = (i == c);
+      for (int j = c; j < i; ++j)
+        sum -= invc[j*n] * Ri[j*n];
+      const double Rii = Rk[i*n + i];
+      if (Rii == 0) {
+        result = false;
+        break;
+      }
+      invk[i*n + c] = sum / Rii;
+    }
+  }
 
   return result;
 }
