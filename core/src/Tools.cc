@@ -282,9 +282,21 @@ void tools::QR(TMatrixD& A, TVectorD& b)
 
   double *const ak = A.GetMatrixArray();
   double *const bk = b.GetMatrixArray();
-  // No variable-length arrays in C++, alloca does the exact same thing ...
-  //double * u = (double *)alloca(sizeof(double)*nRows);
-  double u[500];
+  // No variable-length arrays in C++, alloca does the exact same thing.  (This
+  // replaces a fixed-size "double u[500]" stack buffer that silently limited
+  // nRows and wasted stack for small matrices.)
+  double *const u = (double *)alloca(sizeof(double)*nRows);
+
+  // The Householder transformation applied to the trailing submatrix,
+  // (I - beta u u') A, can be evaluated either column by column (long inner
+  // loop over rows, but with a column stride into the row-major storage) or as
+  // a rank-1 update with the inner loop running contiguously across the
+  // remaining columns.  The latter is cache friendly and vectorises well when
+  // there are enough columns; for tall-skinny matrices the column count is too
+  // small for it to pay off and the column-by-column form pipelines better.
+  // Pick per shape; both produce bitwise-identical results.
+  const bool wide = (nRows <= 2*nCols);
+  double *const w = wide ? (double *)alloca(sizeof(double)*nCols) : nullptr;
 
   // Main loop over matrix columns.
   for (int k = 0; k < nCols; ++k) {
@@ -293,34 +305,54 @@ void tools::QR(TMatrixD& A, TVectorD& b)
     double sum = akk*akk;
     // Put together a housholder transformation.
     for (int i = k + 1; i < nRows; ++i) {
-      sum += ak[i*nCols + k]*ak[i*nCols + k];
-      u[i] = ak[i*nCols + k];
+      double aik = ak[i*nCols + k];
+      sum += aik*aik;
+      u[i] = aik;
     }
     double sigma = sqrt(sum);
     double beta = 1/(sum + sigma*fabs(akk));
     // The algorithm uses only the uk[i] for i >= k.
     u[k] = copysign(sigma + fabs(akk), akk);
 
-    // Calculate b (again taking into account zero entries).  This
-    // encodes how the (sub)vector changes by the householder transformation.
-    double yb = 0;
-    for (int j = k; j < nRows; ++j)
-      yb += u[j]*bk[j];
-    yb *= beta;
-    // ... and apply the changes.
-    for (int j = k; j < nRows; ++j)
-      bk[j] -= u[j]*yb;
+    if (wide) {
+      // First pass: accumulate w[i] = sum_j u[j] A[j][i] for the trailing
+      // columns (contiguous inner loop) and yb = sum_j u[j] b[j].
+      for (int i = k; i < nCols; ++i) w[i] = 0;
+      double yb = 0;
+      for (int j = k; j < nRows; ++j) {
+	const double uj = u[j];
+	const double* arow = ak + j*nCols;
+	for (int i = k; i < nCols; ++i)
+	  w[i] += uj*arow[i];
+	yb += uj*bk[j];
+      }
+      for (int i = k; i < nCols; ++i) w[i] *= beta;
+      yb *= beta;
+      // Second pass: rank-1 update A[j][i] -= u[j] w[i] and b[j] -= u[j] yb.
+      for (int j = k; j < nRows; ++j) {
+	const double uj = u[j];
+	double* arow = ak + j*nCols;
+	for (int i = k; i < nCols; ++i)
+	  arow[i] -= uj*w[i];
+	bk[j] -= uj*yb;
+      }
+    } else {
+      // Tall-skinny: apply the transformation to b, then column by column to A.
+      double yb = 0;
+      for (int j = k; j < nRows; ++j)
+	yb += u[j]*bk[j];
+      yb *= beta;
+      for (int j = k; j < nRows; ++j)
+	bk[j] -= u[j]*yb;
 
-    // Calculate y (again taking into account zero entries).  This
-    // encodes how the (sub)matrix changes by the householder transformation.
-    for (int i = k; i < nCols; ++i) {
-      double y = 0;
-      for (int j = k; j < nRows; ++j)
-	y += u[j]*ak[j*nCols + i];
-      y *= beta;
-      // ... and apply the changes.
-      for (int j = k; j < nRows; ++j)
-	ak[j*nCols + i] -= u[j]*y;
+      for (int i = k; i < nCols; ++i) {
+	double y = 0;
+	for (int j = k; j < nRows; ++j)
+	  y += u[j]*ak[j*nCols + i];
+	y *= beta;
+	for (int j = k; j < nRows; ++j)
+	  ak[j*nCols + i] -= u[j]*y;
+      }
     }
   }
 
