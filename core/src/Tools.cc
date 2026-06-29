@@ -231,6 +231,131 @@ bool tools::transposedInvert(const TMatrixD& R, TMatrixD& inv)
   return result;
 }
 
+namespace {
+
+// Upper-triangular Cholesky factorisation of a symmetric positive-definite
+// matrix C (n x n, full row-major storage as kept by TMatrixDSym), writing the
+// upper-triangular factor U (with C = U^T U) into the upper triangle of the
+// n x n buffer U.  Only the upper triangle and the diagonal of U are written;
+// the strictly-lower triangle is left as-is (the sole consumer here,
+// transposedInvert(), reads only the upper triangle).
+//
+// This follows ROOT's TDecompChol::Decompose() (same summation order), with one
+// deliberate change: the off-diagonal entries of each row are scaled by the
+// reciprocal 1/ujj computed once per row, instead of dividing each entry by ujj.
+// That replaces n-1 divisions per row with one division and n-1 multiplies,
+// which is faster.  It is NOT bit-identical to ROOT's division (the reciprocal
+// rounds once more), but the difference is bounded by ~1 ulp; test_calcAverage
+// checks that the resulting averaged state/covariance stay well within a tight
+// relative tolerance of the original ROOT-TDecompChol code path.  This also
+// avoids the per-call TDecompChol object (matrix copy, norm, virtual dispatch,
+// lower-triangle zeroing).  Returns false if C is not positive definite.
+bool choleskyUpper(const double* C, double* U, int n)
+{
+  for (int icol = 0; icol < n; ++icol) {
+    const int rowOff = icol*n;
+
+    // Diagonal element U(icol,icol); test for non-positive-definiteness.
+    double ujj = C[rowOff + icol];
+    for (int irow = 0; irow < icol; ++irow) {
+      const double u = U[irow*n + icol];
+      ujj -= u*u;
+    }
+    if (ujj <= 0)
+      return false;
+    ujj = sqrt(ujj);
+    U[rowOff + icol] = ujj;
+    const double inv_ujj = 1.0 / ujj;
+
+    // Off-diagonal elements of this row.
+    for (int j = icol + 1; j < n; ++j) {
+      double s = C[rowOff + j];
+      for (int i = 0; i < icol; ++i)
+        s -= U[i*n + j]*U[i*n + icol];
+      U[rowOff + j] = s * inv_ujj;
+    }
+  }
+  return true;
+}
+
+} // anonymous namespace
+
+bool tools::averageState(const TVectorD& state1, const TMatrixDSym& cov1,
+                         const TVectorD& state2, const TMatrixDSym& cov2,
+                         TVectorD& avgState, TMatrixD& avgCovFactor)
+{
+  // See genfit::calcAverageState() for the derivation.  In short: with the
+  // upper Cholesky factors S1, S2 (cov1 = S1' S1, cov2 = S2' S2) the combined
+  // information is (S1inv', S2inv').(S1inv; S2inv) where Sinv = (S')^-1.  A QR
+  // decomposition of A = (S1inv; S2inv) gives an upper triangular R with
+  // R'R = cov1^-1 + cov2^-1, hence avgCov = R^-1 R'^-1 and the averaged state
+  // follows from the same orthogonal transformation applied to (S1inv.x1;
+  // S2inv.x2).
+  const int nRows = cov1.GetNrows();
+  assert(cov2.GetNrows() == nRows);
+
+  // Upper Cholesky factors S1, S2 of the two covariance matrices.
+  TMatrixD S1(nRows, nRows), S2(nRows, nRows);
+  if (!choleskyUpper(cov1.GetMatrixArray(), S1.GetMatrixArray(), nRows))
+    return false;
+  if (!choleskyUpper(cov2.GetMatrixArray(), S2.GetMatrixArray(), nRows))
+    return false;
+
+  // S1inv = (S1')^-1, S2inv = (S2')^-1 -- both lower triangular.
+  TMatrixD S1inv, S2inv;
+  transposedInvert(S1, S1inv);
+  transposedInvert(S2, S2inv);
+
+  // Assemble A = (S1inv; S2inv) and b = (S1inv.x1; S2inv.x2).  A is zero-filled
+  // by its constructor, so the strictly-upper-triangular halves of the two
+  // lower-triangular blocks stay zero and only j <= i is written.
+  TMatrixD A(2*nRows, nRows);
+  TVectorD b(2*nRows);
+  double *const Ak = A.GetMatrixArray();
+  double *const bk = b.GetMatrixArray();
+  const double* const S1invk = S1inv.GetMatrixArray();
+  const double* const S2invk = S2inv.GetMatrixArray();
+  const double* const x1 = state1.GetMatrixArray();
+  const double* const x2 = state2.GetMatrixArray();
+  for (int i = 0; i < nRows; ++i) {
+    double sum1 = 0;
+    double sum2 = 0;
+    for (int j = 0; j <= i; ++j) {
+      const double s1 = S1invk[i*nRows + j];
+      const double s2 = S2invk[i*nRows + j];
+      Ak[i*nRows + j]           = s1;
+      Ak[(i + nRows)*nRows + j] = s2;
+      sum1 += s1*x1[j];
+      sum2 += s2*x2[j];
+    }
+    bk[i]         = sum1;
+    bk[i + nRows] = sum2;
+  }
+
+  // QR decomposition: R (upper triangular) ends up in the top nRows rows of A,
+  // and Q'b in b (only its first nRows entries are needed below).
+  QR(A, b);
+  A.ResizeTo(nRows, nRows);
+
+  // avgCovFactor = (R')^-1 (lower triangular); avgCov = avgCovFactor' avgCovFactor.
+  transposedInvert(A, avgCovFactor);
+
+  // averaged state = R^-1 . (top of Q'b), i.e. avgCovFactor' . (Q'b).  Reading
+  // the result into avgState (rather than overwriting b in place) is identical
+  // because each output entry only depends on not-yet-overwritten inputs.
+  const double* const invk = avgCovFactor.GetMatrixArray();
+  avgState.ResizeTo(nRows);
+  double* const sk = avgState.GetMatrixArray();
+  for (int i = 0; i < nRows; ++i) {
+    double sum = 0;
+    for (int j = i; j < nRows; ++j)
+      sum += invk[j*nRows + i] * bk[j];
+    sk[i] = sum;
+  }
+
+  return true;
+}
+
 // This replaces A with an upper right matrix connected to A by a
 // orthogonal transformation.  I.e., it computes the R from a QR
 // decomposition of A replacing A.
