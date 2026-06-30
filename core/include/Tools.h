@@ -74,6 +74,24 @@ bool averageState(const TVectorD& state1, const TMatrixDSym& cov1,
                   const TVectorD& state2, const TMatrixDSym& cov2,
                   TVectorD& avgState, TMatrixD& avgCovFactor);
 
+/** @brief In-place similarity transform: sym <- B * sym * B^T.
+ *
+ *  Drop-in replacement for ROOT's TMatrixDSym::Similarity(const TMatrixD&),
+ *  specialised for the small dense matrices used by the Kalman fitter.  @p sym
+ *  is an (n x n) symmetric matrix and @p B an (m x n) matrix; on return @p sym
+ *  holds the (m x m) symmetric product B*sym*B^T (resized if m != n).
+ *
+ *  The arithmetic is mathematically identical to ROOT's but uses a different
+ *  summation order, so the result agrees with TMatrixDSym::Similarity to within
+ *  rounding (~1e-12 relative), not necessarily bit-for-bit.
+ */
+void similarity(const TMatrixD& B, TMatrixDSym& sym);
+
+/** @brief Scalar similarity: returns v^T * A * v.
+ *
+ *  Drop-in replacement for A.Similarity(const TVectorD&). */
+double similarity(const TVectorD& v, const TMatrixDSym& A);
+
 /** @brief Replaces A with an upper right matrix connected to A by
  *  an orthongonal transformation.  I.e., it computes R from a QR
  *  decomposition of A = QR, replacing A.

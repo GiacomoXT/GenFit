@@ -356,6 +356,78 @@ bool tools::averageState(const TVectorD& state1, const TMatrixDSym& cov1,
   return true;
 }
 
+// sym <- B * sym * B^T, in place.  Drop-in replacement for ROOT's
+// TMatrixDSym::Similarity(const TMatrixD&), tuned for the small dense matrices
+// of the Kalman fitter: no validity checks, no virtual dispatch, no generic
+// AMultB helper call, and tight index loops the compiler can vectorise.
+//
+// Like ROOT it forms the product in two steps -- T = B*sym, then B*sym*B^T --
+// and fills only the upper triangle of the symmetric result before mirroring.
+// The summation order differs from ROOT's, so the result matches
+// TMatrixDSym::Similarity to within rounding rather than bit-for-bit.
+void tools::similarity(const TMatrixD& B, TMatrixDSym& sym)
+{
+  const int n = sym.GetNrows();   // sym is n x n (symmetric, full storage)
+  const int m = B.GetNrows();     // B is m x n
+  assert(B.GetNcols() == n);
+
+  const double* const Bp = B.GetMatrixArray();
+  const double* const Ap = sym.GetMatrixArray();
+
+  // T = B * sym   (m x n).  sym is symmetric, so its column k equals its row k;
+  // reading row k (Ap + k*n) makes both operands of the inner product
+  // contiguous, which vectorises far better than the strided column access.
+  double* const T = (double*)alloca(sizeof(double) * m * n);
+  for (int i = 0; i < m; ++i) {
+    const double* const Brow = Bp + i*n;
+    double* const Trow = T + i*n;
+    for (int k = 0; k < n; ++k) {
+      const double* const Arow = Ap + k*n;   // row k == column k (symmetric)
+      double s = 0;
+      for (int j = 0; j < n; ++j)
+        s += Brow[j] * Arow[j];
+      Trow[k] = s;
+    }
+  }
+
+  // sym <- T * B^T   (m x m, symmetric).  T and B are independent of sym's
+  // storage, so resizing/overwriting sym now is safe.  Compute the upper
+  // triangle and mirror into the lower one.
+  if (m != n)
+    sym.ResizeTo(m, m);
+  double* const Cp = sym.GetMatrixArray();
+  for (int i = 0; i < m; ++i) {
+    const double* const Ti = T + i*n;
+    for (int jcol = i; jcol < m; ++jcol) {
+      const double* const Bj = Bp + jcol*n;   // row jcol of B == column jcol of B^T
+      double s = 0;
+      for (int k = 0; k < n; ++k)
+        s += Ti[k] * Bj[k];
+      Cp[i*m + jcol] = s;
+      Cp[jcol*m + i] = s;
+    }
+  }
+}
+
+// Returns v^T * A * v.  Drop-in replacement for A.Similarity(const TVectorD&);
+// the loop structure matches ROOT's, so the result is effectively identical.
+double tools::similarity(const TVectorD& v, const TMatrixDSym& A)
+{
+  const int n = v.GetNrows();
+  const double* const vp = v.GetMatrixArray();
+  const double* const Ap = A.GetMatrixArray();
+
+  double sum1 = 0;
+  for (int i = 0; i < n; ++i) {
+    const double* const Arow = Ap + i*n;
+    double sum2 = 0;
+    for (int j = 0; j < n; ++j)
+      sum2 += Arow[j] * vp[j];
+    sum1 += sum2 * vp[i];
+  }
+  return sum1;
+}
+
 // This replaces A with an upper right matrix connected to A by a
 // orthogonal transformation.  I.e., it computes the R from a QR
 // decomposition of A replacing A.
