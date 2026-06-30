@@ -67,6 +67,8 @@ public:
   bool isInitialized() { return materialInterface_ != nullptr; }
 
   void setNoEffects(bool opt = true) {noEffects_ = opt;}
+  //! Whether material effects are currently disabled (for save/restore around scoped overrides).
+  bool getNoEffects() const {return noEffects_;}
 
   void setEnergyLossBetheBloch(bool opt = true) {energyLossBetheBloch_ = opt; noEffects_ = false;}
   void setNoiseBetheBloch(bool opt = true) {noiseBetheBloch_ = opt; noEffects_ = false;}
