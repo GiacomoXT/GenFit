@@ -191,7 +191,10 @@ TEST(ProcessTrackPointKernel, MatchesRoot)
 
           TMatrixD CHt(C, TMatrixD::kMultTranspose, H);   // dim x m
           TVectorD res = meas - H * p;
-          p += TMatrixD(CHt, TMatrixD::kMult, Sinv) * res;
+          if (useTools)
+            p += CHt * (Sinv * res);                       // reassociated Kalman gain
+          else
+            p += TMatrixD(CHt, TMatrixD::kMult, Sinv) * res;
 
           TMatrixDSym covTerm(Sinv);
           if (useTools) tools::similarity(CHt, covTerm); else covTerm.Similarity(CHt);  // (2)

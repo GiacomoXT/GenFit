@@ -1032,10 +1032,15 @@ KalmanFitterRefTrack::processTrackPoint(KalmanFitterInfo* fi, const KalmanFitter
       debugOut << "residual        "; res_.Print();
       debugOut << "\033[0m";
     }
-    p_ +=  TMatrixD(CHt, TMatrixD::kMult, covSumInv_) * res_; // updated state
+    // Apply the Kalman gain as CHt * (covSumInv_ * res_) instead of forming the
+    // explicit (dim x m) gain matrix (CHt * covSumInv_) and multiplying that by
+    // res_.  Reassociating the product turns a matrix-matrix multiply (plus its
+    // temporary) into a cheap matrix-vector multiply; the result is identical up
+    // to floating-point rounding.
+    p_ += CHt * (covSumInv_ * res_); // updated state
     if (debugLvl_ > 1) {
       debugOut << "\033[32m";
-      debugOut << " update"; (TMatrixD(CHt, TMatrixD::kMult, covSumInv_) * res_).Print();
+      debugOut << " update"; (CHt * (covSumInv_ * res_)).Print();
       debugOut << "\033[0m";
     }
 
